@@ -1,7 +1,7 @@
 import os
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 from fastapi import HTTPException, status
@@ -17,6 +17,8 @@ class Controller:
     COMPOSE_FILENAME_T = "%d_compose.yml"
     CONTAINER_NAME_T = "mc_%d"
 
+    container_locks: ClassVar[dict[str, threading.Lock]] = {}
+
     @classmethod
     def deploy(cls, config: ContainerConfig) -> str:
         """In the /containers directory creates a {config.mc_port}_compose.yml file."""
@@ -24,8 +26,15 @@ class Controller:
         path = os.path.join(
             Controller.CONTAINERS_DIR, Controller.COMPOSE_FILENAME_T % config.mc_port
         )
+        name = Controller.CONTAINER_NAME_T % config.mc_port
 
-        def _write_file():
+        if not cls.__acquire(name):
+            return "processing"
+
+        def _stop_and_write():
+            if Controller.is_online(config.mc_port):
+                cls.stop(config.mc_port, wait=True)
+
             logger.info(f"Writing compose file to {path}")
             with open(path, "w") as file:
                 yaml.dump(
@@ -35,22 +44,18 @@ class Controller:
                     sort_keys=False,
                 )
 
-        def _stop_and_write():
-            cls.stop(config.mc_port, wait=True)
-            _write_file()
+        def _on_complete():
+            logger.info(
+                f"Completed deployment of {Controller.CONTAINER_NAME_T % config.mc_port}"
+            )
+            cls.__release(name)
 
         try:
-            if Controller.is_online(config.mc_port):
-                Controller.run_task(
-                    task=_stop_and_write,
-                    on_complete=lambda: logger.info(
-                        f"Completed deployment of {Controller.CONTAINER_NAME_T % config.mc_port}"
-                    ),
-                )
-                return "processing"
-
-            _write_file()
-            return "completed"
+            Controller.run_task(
+                task=_stop_and_write,
+                on_complete=_on_complete,
+            )
+            return "processing"
         except OSError as e:
             logger.error(f"Failed to write file {path}: {e}")
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -67,15 +72,21 @@ class Controller:
                 status.HTTP_404_NOT_FOUND, f"file {path} does not exist"
             )
 
-        logger.info(f"Starting container {Controller.CONTAINER_NAME_T % mc_port}")
+        name = Controller.CONTAINER_NAME_T % mc_port
+        if not cls.__acquire(name):
+            logger.info(f"Already starting container {name}")
+            return "processing"
+
+        logger.info(f"Starting container {name}")
+
+        def _on_complete():
+            logger.info(f"Completed docker.compose.up of {name}")
+            cls.__release(name)
 
         try:
-            docker = DockerClient(compose_files=[path])
             Controller.run_task(
-                task=docker.compose.up,
-                on_complete=lambda: logger.info(
-                    f"Completed docker.compose.up of {Controller.CONTAINER_NAME_T % mc_port}"
-                ),
+                task=DockerClient(compose_files=[path]).compose.up,
+                on_complete=_on_complete,
                 task_kwargs={"quiet": True, "wait": True, "detach": True},
                 wait=wait,
             )
@@ -95,21 +106,28 @@ class Controller:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"file {path} does not exist"
             )
-        logger.info(f"Stopping container {Controller.CONTAINER_NAME_T % mc_port}")
+
+        name = Controller.CONTAINER_NAME_T % mc_port
+        if not cls.__acquire(name):
+            logger.info(f"Already stopping container {name}")
+            return "processing"
+
+        logger.info(f"Stopping container {name}")
+
+        def _on_complete():
+            logger.info(f"Completed docker.compose.down of {name}")
+            cls.__release(name)
 
         try:
-            docker = DockerClient(compose_files=[path])
             Controller.run_task(
-                task=docker.compose.down,
-                on_complete=lambda: logger.info(
-                    f"Completed docker.compose.down of {Controller.CONTAINER_NAME_T % mc_port}"
-                ),
+                task=DockerClient(compose_files=[path]).compose.down,
+                on_complete=_on_complete,
                 task_kwargs={"quiet": True},
                 wait=wait,
             )
             return "processing"
         except NoSuchContainer as _:
-            msg = f"Container {Controller.CONTAINER_NAME_T % mc_port} is not up."
+            msg = f"Container {name} is not up."
             logger.info(msg)
             raise HTTPException(status.HTTP_404_NOT_FOUND, msg)
         except DockerException as e:
@@ -205,3 +223,13 @@ class Controller:
         t.start()
         if wait:
             t.join()
+
+    @classmethod
+    def __acquire(cls, name: str) -> bool:
+        lock = cls.container_locks.setdefault(name, threading.Lock())
+        return lock.acquire(blocking=False)
+
+    @classmethod
+    def __release(cls, name: str):
+        cls.container_locks[name].release()
+        del cls.container_locks[name]
