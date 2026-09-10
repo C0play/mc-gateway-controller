@@ -4,7 +4,6 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import APIKeyHeader
 
 from controller import Controller
-from logger import logger
 from models import ContainerConfig
 
 
@@ -23,31 +22,19 @@ class API:
             path="/container/create", dependencies=[Depends(self.authenticator)]
         )
         def create_container(config: ContainerConfig):
-            try:
-                Controller.deploy(config)
-            except Exception as e:
-                logger.error(f"Failed to deploy container: {e}")
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            Controller.deploy(config)
 
         @self.app.post(
             path="/container/start/{port}", dependencies=[Depends(self.authenticator)]
         )
         def container_start(port: int):
-            try:
-                Controller.start(port)
-            except Exception as e:
-                logger.error(f"Failed to start container: {e}")
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            Controller.start(port)
 
         @self.app.post(
             path="/container/stop/{port}", dependencies=[Depends(self.authenticator)]
         )
         def container_stop(port: int):
-            try:
-                Controller.stop(port)
-            except Exception as e:
-                logger.error(f"Failed to stop container: {e}")
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            Controller.stop(port)
 
     @property
     def authenticator(self):

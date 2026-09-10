@@ -2,7 +2,9 @@ import os
 from typing import Any
 
 import yaml
+from fastapi import HTTPException, status
 from python_on_whales import DockerClient
+from python_on_whales.exceptions import DockerException, NoSuchContainer
 
 from logger import logger
 from models import ContainerConfig
@@ -18,15 +20,19 @@ class Controller:
         """In the /containers directory creates a {config.mc_port}_compose.yml file."""
 
         filename = Controller.COMPOSE_FILENAME_T % config.mc_port
-        logger.info(f"Deploying config to {filename}")
+        logger.info(f"Writing compose file to {filename}")
 
-        with open(os.path.join(Controller.CONTAINERS_DIR, filename), "w") as file:
-            yaml.dump(
-                cls.__generate_yaml(config),
-                file,
-                default_flow_style=False,
-                sort_keys=False,
-            )
+        try:
+            with open(os.path.join(Controller.CONTAINERS_DIR, filename), "w") as file:
+                yaml.dump(
+                    cls.__generate_yaml(config),
+                    file,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+        except OSError as e:
+            logger.error(f"Failed to write file {filename}: {e}")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @classmethod
     def start(cls, mc_port: int):
@@ -35,15 +41,22 @@ class Controller:
         path = os.path.join(
             Controller.CONTAINERS_DIR, Controller.COMPOSE_FILENAME_T % mc_port
         )
-        container_name = Controller.CONTAINER_NAME_T % mc_port
-        docker = DockerClient(compose_files=[path])
+        if not os.path.exists(path):
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"file {path} does not exist"
+            )
 
-        logger.info(f"Starting container {container_name}")
+        logger.info(f"Starting container {Controller.CONTAINER_NAME_T % mc_port}")
 
-        docker.compose.up(
-            detach=True,
-            quiet=True,
-        )
+        try:
+            docker = DockerClient(compose_files=[path])
+            docker.compose.up(
+                detach=True,
+                quiet=True,
+            )
+        except DockerException as e:
+            logger.error(f"Command {e.docker_command} exited with {e.return_code}: {e}")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @classmethod
     def stop(cls, mc_port: int):
@@ -52,13 +65,24 @@ class Controller:
         path = os.path.join(
             Controller.CONTAINERS_DIR, Controller.COMPOSE_FILENAME_T % mc_port
         )
-        container_name = Controller.CONTAINER_NAME_T % mc_port
-        docker = DockerClient(compose_files=[path])
+        if not os.path.exists(path):
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"file {path} does not exist"
+            )
+        logger.info(f"Stopping container {Controller.CONTAINER_NAME_T % mc_port}")
 
-        logger.info(f"Stopping container {container_name}")
-        docker.compose.down(
-            quiet=True,
-        )
+        try:
+            docker = DockerClient(compose_files=[path])
+            docker.compose.down(
+                quiet=True,
+            )
+        except NoSuchContainer as _:
+            msg = f"Container {Controller.CONTAINER_NAME_T % mc_port} is not up."
+            logger.info(msg)
+            raise HTTPException(status.HTTP_404_NOT_FOUND, msg)
+        except DockerException as e:
+            logger.error(f"Command {e.docker_command} exited with {e.return_code}: {e}")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @classmethod
     def __generate_yaml(cls, config: ContainerConfig) -> dict:
