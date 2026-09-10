@@ -1,6 +1,7 @@
+import json
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import APIKeyHeader
 
 from controller import Controller
@@ -22,19 +23,34 @@ class API:
             path="/container/create", dependencies=[Depends(self.authenticator)]
         )
         def create_container(config: ContainerConfig):
-            Controller.deploy(config)
+            state = Controller.deploy(config)
+            return Response(
+                json.dumps({"status": state}),
+                status.HTTP_202_ACCEPTED,
+                media_type="application/json",
+            )
 
         @self.app.post(
             path="/container/start/{port}", dependencies=[Depends(self.authenticator)]
         )
         def container_start(port: int):
-            Controller.start(port)
+            state = Controller.start(port)
+            return Response(
+                json.dumps({"status": state}),
+                status.HTTP_202_ACCEPTED,
+                media_type="application/json",
+            )
 
         @self.app.post(
             path="/container/stop/{port}", dependencies=[Depends(self.authenticator)]
         )
         def container_stop(port: int):
-            Controller.stop(port)
+            state = Controller.stop(port)
+            return Response(
+                json.dumps({"status": state}),
+                status.HTTP_202_ACCEPTED,
+                media_type="application/json",
+            )
 
     @property
     def authenticator(self):
