@@ -21,11 +21,13 @@ class Controller:
     def deploy(cls, config: ContainerConfig) -> str:
         """In the /containers directory creates a {config.mc_port}_compose.yml file."""
 
-        filename = Controller.COMPOSE_FILENAME_T % config.mc_port
-        logger.info(f"Writing compose file to {filename}")
+        path = os.path.join(
+            Controller.CONTAINERS_DIR, Controller.COMPOSE_FILENAME_T % config.mc_port
+        )
 
-        try:
-            with open(os.path.join(Controller.CONTAINERS_DIR, filename), "w") as file:
+        def _write_file():
+            logger.info(f"Writing compose file to {path}")
+            with open(path, "w") as file:
                 yaml.dump(
                     cls.__generate_yaml(config),
                     file,
@@ -33,13 +35,28 @@ class Controller:
                     sort_keys=False,
                 )
 
+        def _stop_and_write():
+            cls.stop(config.mc_port, wait=True)
+            _write_file()
+
+        try:
+            if Controller.is_online(config.mc_port):
+                Controller.run_task(
+                    task=_stop_and_write,
+                    on_complete=lambda: logger.info(
+                        f"Completed deployment of {Controller.CONTAINER_NAME_T % config.mc_port}"
+                    ),
+                )
+                return "processing"
+
+            _write_file()
             return "completed"
         except OSError as e:
-            logger.error(f"Failed to write file {filename}: {e}")
+            logger.error(f"Failed to write file {path}: {e}")
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @classmethod
-    def start(cls, mc_port: int) -> str:
+    def start(cls, mc_port: int, wait: bool = False) -> str:
         """Starts the container."""
 
         path = os.path.join(
@@ -60,6 +77,7 @@ class Controller:
                     f"Completed docker.compose.up of {Controller.CONTAINER_NAME_T % mc_port}"
                 ),
                 task_kwargs={"quiet": True, "wait": True, "detach": True},
+                wait=wait,
             )
             return "processing"
         except DockerException as e:
@@ -67,7 +85,7 @@ class Controller:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @classmethod
-    def stop(cls, mc_port: int) -> str:
+    def stop(cls, mc_port: int, wait: bool = False) -> str:
         """Stops the container."""
 
         path = os.path.join(
@@ -84,15 +102,33 @@ class Controller:
             Controller.run_task(
                 task=docker.compose.down,
                 on_complete=lambda: logger.info(
-                    f"Completed docker.compose.daown of {Controller.CONTAINER_NAME_T % mc_port}"
+                    f"Completed docker.compose.down of {Controller.CONTAINER_NAME_T % mc_port}"
                 ),
                 task_kwargs={"quiet": True},
+                wait=wait,
             )
             return "processing"
         except NoSuchContainer as _:
             msg = f"Container {Controller.CONTAINER_NAME_T % mc_port} is not up."
             logger.info(msg)
             raise HTTPException(status.HTTP_404_NOT_FOUND, msg)
+        except DockerException as e:
+            logger.error(f"Command {e.docker_command} exited with {e.return_code}: {e}")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @classmethod
+    def is_online(cls, mc_port: int) -> bool:
+        """Checks if the container is online."""
+
+        name = Controller.CONTAINER_NAME_T % mc_port
+        try:
+            docker = DockerClient()
+
+            for container in docker.ps():
+                if container.name == name:
+                    return True
+            return False
+
         except DockerException as e:
             logger.error(f"Command {e.docker_command} exited with {e.return_code}: {e}")
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -155,6 +191,7 @@ class Controller:
         on_complete: Callable,
         task_kwargs: dict | None = None,
         on_complete_kwargs: dict | None = None,
+        wait: bool = False,
     ):
         """Creates and starts a thread that executes the task and then calls the on_complete function."""
 
@@ -164,4 +201,7 @@ class Controller:
             args = {} if on_complete_kwargs is None else on_complete_kwargs
             on_complete(**args)
 
-        threading.Thread(target=_wrapper).start()
+        t = threading.Thread(target=_wrapper)
+        t.start()
+        if wait:
+            t.join()
