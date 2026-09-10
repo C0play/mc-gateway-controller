@@ -1,0 +1,18 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+
+# Environment variables
+.env
+
+# Dev compose files
+*.yml
+!compose.example.yml
+
+# Other
+.zed
+Makefile

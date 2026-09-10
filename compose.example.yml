@@ -1,0 +1,15 @@
+services:
+  mc-gateway-controller:
+    image: mc-gateway-controller:latest
+    container_name: mc-gateway-controller
+    environment:
+      API_KEY: "abc" # REPLACE
+    ports:
+      - 6521:6521
+    restart: unless-stopped
+    volumes:
+      - containers:/app/containers
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+volumes:
+  containers:

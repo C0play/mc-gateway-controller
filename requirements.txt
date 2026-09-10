@@ -1,0 +1,6 @@
+python_on_whales
+pyyaml
+pydantic
+pydantic_extra_types
+fastapi
+uvicorn
