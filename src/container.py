@@ -1,7 +1,5 @@
 import os
-import threading
-from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import Any
 
 import yaml
 from fastapi import HTTPException, status
@@ -12,28 +10,22 @@ from logger import logger
 from models import ContainerConfig
 
 
-class Controller:
+class Container:
     CONTAINERS_DIR = "/app/containers"
     COMPOSE_FILENAME_T = "%d_compose.yml"
     CONTAINER_NAME_T = "mc_%d"
 
-    container_locks: ClassVar[dict[str, threading.Lock]] = {}
-
     @classmethod
-    def deploy(cls, config: ContainerConfig) -> str:
+    def deploy(cls, config: ContainerConfig):
         """In the /containers directory creates a {config.mc_port}_compose.yml file."""
 
         path = os.path.join(
-            Controller.CONTAINERS_DIR, Controller.COMPOSE_FILENAME_T % config.mc_port
+            Container.CONTAINERS_DIR,
+            Container.COMPOSE_FILENAME_T % config.mc_port,
         )
-        name = Controller.CONTAINER_NAME_T % config.mc_port
-
-        if not cls.__acquire(name):
-            return "processing"
-
-        def _stop_and_write():
-            if Controller.is_online(config.mc_port):
-                cls.stop(config.mc_port, wait=True)
+        try:
+            if Container.is_online(config.mc_port):
+                cls.stop(config.mc_port)
 
             logger.info(f"Writing compose file to {path}")
             with open(path, "w") as file:
@@ -43,89 +35,52 @@ class Controller:
                     default_flow_style=False,
                     sort_keys=False,
                 )
-
-        def _on_complete():
-            logger.info(
-                f"Completed deployment of {Controller.CONTAINER_NAME_T % config.mc_port}"
-            )
-            cls.__release(name)
-
-        try:
-            Controller.run_task(
-                task=_stop_and_write,
-                on_complete=_on_complete,
-            )
-            return "processing"
         except OSError as e:
             logger.error(f"Failed to write file {path}: {e}")
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @classmethod
-    def start(cls, mc_port: int, wait: bool = False) -> str:
+    def start(cls, mc_port: int):
         """Starts the container."""
 
         path = os.path.join(
-            Controller.CONTAINERS_DIR, Controller.COMPOSE_FILENAME_T % mc_port
+            Container.CONTAINERS_DIR,
+            Container.COMPOSE_FILENAME_T % mc_port,
         )
         if not os.path.exists(path):
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"file {path} does not exist"
             )
 
-        name = Controller.CONTAINER_NAME_T % mc_port
-        if not cls.__acquire(name):
-            logger.info(f"Already starting container {name}")
-            return "processing"
-
+        name = Container.CONTAINER_NAME_T % mc_port
         logger.info(f"Starting container {name}")
 
-        def _on_complete():
-            logger.info(f"Completed docker.compose.up of {name}")
-            cls.__release(name)
-
         try:
-            Controller.run_task(
-                task=DockerClient(compose_files=[path]).compose.up,
-                on_complete=_on_complete,
-                task_kwargs={"quiet": True, "wait": True, "detach": True},
-                wait=wait,
+            DockerClient(compose_files=[path]).compose.up(
+                quiet=True, wait=True, detach=True
             )
-            return "processing"
         except DockerException as e:
             logger.error(f"Command {e.docker_command} exited with {e.return_code}: {e}")
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @classmethod
-    def stop(cls, mc_port: int, wait: bool = False) -> str:
+    def stop(cls, mc_port: int):
         """Stops the container."""
 
         path = os.path.join(
-            Controller.CONTAINERS_DIR, Controller.COMPOSE_FILENAME_T % mc_port
+            Container.CONTAINERS_DIR,
+            Container.COMPOSE_FILENAME_T % mc_port,
         )
         if not os.path.exists(path):
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"file {path} does not exist"
             )
 
-        name = Controller.CONTAINER_NAME_T % mc_port
-        if not cls.__acquire(name):
-            logger.info(f"Already stopping container {name}")
-            return "processing"
-
+        name = Container.CONTAINER_NAME_T % mc_port
         logger.info(f"Stopping container {name}")
 
-        def _on_complete():
-            logger.info(f"Completed docker.compose.down of {name}")
-            cls.__release(name)
-
         try:
-            Controller.run_task(
-                task=DockerClient(compose_files=[path]).compose.down,
-                on_complete=_on_complete,
-                task_kwargs={"quiet": True},
-                wait=wait,
-            )
-            return "processing"
+            DockerClient(compose_files=[path]).compose.down(quiet=True)
         except NoSuchContainer as _:
             msg = f"Container {name} is not up."
             logger.info(msg)
@@ -138,7 +93,7 @@ class Controller:
     def is_online(cls, mc_port: int) -> bool:
         """Checks if the container is online."""
 
-        name = Controller.CONTAINER_NAME_T % mc_port
+        name = Container.CONTAINER_NAME_T % mc_port
         try:
             docker = DockerClient()
 
@@ -200,36 +155,4 @@ class Controller:
                 f"mc_{config.mc_port}_data": {"name": f"mc_{config.mc_port}_data"}
             },
         }
-
         return compose_content
-
-    @staticmethod
-    def run_task(
-        task: Callable,
-        on_complete: Callable,
-        task_kwargs: dict | None = None,
-        on_complete_kwargs: dict | None = None,
-        wait: bool = False,
-    ):
-        """Creates and starts a thread that executes the task and then calls the on_complete function."""
-
-        def _wrapper():
-            args = {} if task_kwargs is None else task_kwargs
-            task(**args)
-            args = {} if on_complete_kwargs is None else on_complete_kwargs
-            on_complete(**args)
-
-        t = threading.Thread(target=_wrapper)
-        t.start()
-        if wait:
-            t.join()
-
-    @classmethod
-    def __acquire(cls, name: str) -> bool:
-        lock = cls.container_locks.setdefault(name, threading.Lock())
-        return lock.acquire(blocking=False)
-
-    @classmethod
-    def __release(cls, name: str):
-        cls.container_locks[name].release()
-        del cls.container_locks[name]

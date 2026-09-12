@@ -10,7 +10,7 @@ console_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter(
     "{asctime} - {levelname:>8} - {message} || {funcName}",
     style="{",
-    datefmt="%Y-%m-%d %H:%M",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
 console_handler.setFormatter(formatter)
