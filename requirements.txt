@@ -4,3 +4,4 @@ pydantic
 pydantic_extra_types
 fastapi
 uvicorn
+requests

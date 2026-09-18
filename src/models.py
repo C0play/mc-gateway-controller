@@ -1,6 +1,5 @@
 from datetime import datetime
 from typing import Literal, TypeAlias
-from uuid import UUID
 
 from pydantic import BaseModel, Field
 from pydantic_extra_types.timezone_name import TimeZoneName
@@ -41,13 +40,27 @@ class ContainerConfig(BaseModel):
     custom_server_properties: list = Field([], description="List of custom properties.")
 
 
-StatusType = Literal["rejected", "processing", "completed"]
+TaskStatus = Literal["rejected", "processing", "completed", "failed"]
 
 
 class TaskInfo(BaseModel):
-    status: StatusType = Field(description="Task status.")
-    id: UUID = Field(description="Task identifier.")
+    status: TaskStatus = Field(description="Task status.")
+    id: str = Field(description="Task identifier.")
+    container_name: str = Field(description="Container name.")
+    job: str = Field(description="Job name.")
     created_time: datetime = Field(description="Time when the task was submitted")
     completed_time: datetime | None = Field(
         None, description="Time when the task was completed"
     )
+
+
+ContainerStatus = Literal[
+    "starting",
+    "online",
+    "stopping",
+    "offline",
+]
+
+
+class StatusResponse(BaseModel):
+    status: ContainerStatus = Field(description="Container status.")

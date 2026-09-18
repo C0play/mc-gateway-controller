@@ -23,21 +23,20 @@ class Worker:
                 continue
             kwargs[name] = value
 
-        self.function(**kwargs)
+        return self.function(**kwargs)
 
 
 @dataclass
 class Callback(Worker):
-    def __call__(self, task_id: uuid.UUID, created_time: datetime) -> Any:
-        return super().__call__(task_id=task_id, created_time=created_time)
+    def __call__(self, info: TaskInfo) -> Any:
+        return super().__call__(info=info)
 
 
 @dataclass
 class Task:
-    task: Worker
+    worker: Worker
     callback: Callback
-    id: uuid.UUID
-    created_time: datetime
+    info: TaskInfo
 
 
 class TaskManager:
@@ -53,25 +52,36 @@ class TaskManager:
         logger.info("Stopping task manager.")
         self.queue.shutdown()
 
-    def push(self, task: Worker, callback: Callback) -> TaskInfo:
+    def push(
+        self,
+        worker: Worker,
+        callback: Callback,
+        container_name: str,
+        job_name: str,
+    ) -> TaskInfo:
         id = uuid.uuid7()
-        created_time = datetime.now(UTC)
+
+        info = TaskInfo(
+            status="processing",
+            id=str(id),
+            container_name=container_name,
+            job=job_name,
+            created_time=datetime.now(UTC),
+            completed_time=None,
+        )
         try:
             self.queue.put(
-                Task(task, callback, id, created_time),
+                Task(worker, callback, info),
                 block=False,
             )
         except (queue.Full, queue.ShutDown):
             status = "rejected"
         else:
             status = "processing"
+        info.status = status
 
-        return TaskInfo(
-            status=status,
-            id=id,
-            created_time=created_time,
-            completed_time=None,
-        )
+        logger.debug(f"Queued task {job_name} ({id}) for {container_name}")
+        return info
 
     def pop(self) -> Task | None:
         try:
@@ -82,9 +92,17 @@ class TaskManager:
     def __execute_tasks(self):
         while not self.queue.is_shutdown or not self.queue.empty():
             logger.debug(f"Queue is empty '{self.queue.empty()}'")
-            if t := self.pop():
-                logger.debug(f"Executing task '{t.id}'")
-                t.task()
-                t.callback(t.id, t.created_time)
+            if task := self.pop():
+                logger.debug(f"Executing task '{task.info.id}'")
+                try:
+                    task.worker()
+                except Exception:
+                    logger.exception(f"Task {task.info.job} failed")
+                    task.info.status = "failed"
+                else:
+                    task.info.status = "completed"
+
+                task.info.completed_time = datetime.now(UTC)
+                task.callback(info=task.info)
 
         logger.info("Stopped task manager.")

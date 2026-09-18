@@ -1,20 +1,32 @@
 from typing import Annotated
 
+import requests
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.security import APIKeyHeader
 
 from container import Container
 from logger import logger
-from models import ContainerConfig, StatusType, TaskInfo
+from models import (
+    ContainerConfig,
+    StatusResponse,
+    TaskInfo,
+    TaskStatus,
+)
 from task import Callback, TaskManager, Worker
 
 
 class API:
-    def __init__(self, api_key: str | None, manager: TaskManager) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        mc_gateway_url: str,
+        manager: TaskManager,
+    ) -> None:
 
         self.manager = manager
 
+        self.mc_gateway_url = mc_gateway_url
         self.api_key = api_key
         self.app = FastAPI(title="mc-gateway-controller")
         self.api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
@@ -51,6 +63,16 @@ class API:
 
     def __register_endpoints(self):
 
+        callback = Callback(self.__callback, {})
+
+        @self.app.get(
+            "/container/status/{port}",
+            dependencies=[Depends(self.authenticator)],
+            response_model=StatusResponse,
+        )
+        def get_status(port: int):
+            return {"status": Container.status(port)}
+
         @self.app.post(
             path="/container/create",
             dependencies=[Depends(self.authenticator)],
@@ -58,18 +80,9 @@ class API:
             status_code=202,
         )
         def create_container(config: ContainerConfig, response: Response):
-            info = self.manager.push(
-                Worker(
-                    Container.deploy,
-                    {"config": config},
-                ),
-                Callback(
-                    logger.info,
-                    {
-                        "msg": f"Completed deployment of {Container.CONTAINER_NAME_T % config.mc_port}"
-                    },
-                ),
-            )
+            name = Container.CONTAINER_NAME_T % config.mc_port
+            worker = Worker(Container.deploy, {"config": config})
+            info = self.manager.push(worker, callback, name, "create")
             response.status_code = API.__get_status_code(info.status)
             return info
 
@@ -80,18 +93,9 @@ class API:
             status_code=202,
         )
         def container_start(port: int, response: Response):
-            info = self.manager.push(
-                Worker(
-                    Container.start,
-                    {"mc_port": port},
-                ),
-                Callback(
-                    logger.info,
-                    {
-                        "msg": f"Completed deployment of {Container.CONTAINER_NAME_T % port}"
-                    },
-                ),
-            )
+            name = Container.CONTAINER_NAME_T % port
+            worker = Worker(Container.start, {"mc_port": port})
+            info = self.manager.push(worker, callback, name, "start")
             response.status_code = API.__get_status_code(info.status)
             return info
 
@@ -102,18 +106,22 @@ class API:
             status_code=202,
         )
         def container_stop(port: int, response: Response):
-            info = self.manager.push(
-                Worker(
-                    Container.stop,
-                    {"mc_port": port},
-                ),
-                Callback(
-                    logger.info,
-                    {
-                        "msg": f"Completed deployment of {Container.CONTAINER_NAME_T % port}"
-                    },
-                ),
-            )
+            name = Container.CONTAINER_NAME_T % port
+            worker = Worker(Container.stop, {"mc_port": port})
+            info = self.manager.push(worker, callback, name, "stop")
+            response.status_code = API.__get_status_code(info.status)
+            return info
+
+        @self.app.delete(
+            path="/container/delete/{port}",
+            dependencies=[Depends(self.authenticator)],
+            response_model=TaskInfo,
+            status_code=202,
+        )
+        def container_delete(port: int, response: Response):
+            name = Container.CONTAINER_NAME_T % port
+            worker = Worker(Container.delete, {"mc_port": port})
+            info = self.manager.push(worker, callback, name, "delete")
             response.status_code = API.__get_status_code(info.status)
             return info
 
@@ -126,7 +134,7 @@ class API:
         return _authenticate
 
     @staticmethod
-    def __get_status_code(s: StatusType) -> int:
+    def __get_status_code(s: TaskStatus) -> int:
         match s:
             case "rejected":
                 return status.HTTP_429_TOO_MANY_REQUESTS
@@ -134,3 +142,12 @@ class API:
                 return status.HTTP_202_ACCEPTED
             case "completed":
                 return status.HTTP_200_OK
+            case "failed":
+                return status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    def __callback(self, info: TaskInfo):
+        logger.info(f"Completed task '{info.job}'")
+        requests.post(
+            url=f"{self.mc_gateway_url}/system/task/completed",
+            json=info.model_dump(mode="json"),
+        )
